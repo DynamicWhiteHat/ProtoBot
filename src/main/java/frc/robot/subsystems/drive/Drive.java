@@ -20,7 +20,6 @@ import edu.wpi.first.wpilibj2.command.sysid.SysIdRoutine;
 import frc.lib.littletonUtils.LoggedTunableNumber;
 import frc.lib.littletonUtils.PoseEstimator;
 import frc.robot.Constants.DriveConstants;
-import frc.robot.subsystems.drive.GyroIOInputsAutoLogged;
 import frc.robot.util.AlertManager;
 import frc.robot.util.MeshedDrivingController;
 import frc.robot.util.SubsystemProfiles;
@@ -44,7 +43,6 @@ public class Drive extends SubsystemBase {
   public final GyroIOInputsAutoLogged m_gyroInputs = new GyroIOInputsAutoLogged();
 
   private final Module[] m_modules = new Module[4]; // FL, FR, BL, BR
-  private final SysIdRoutine m_sysId;
   private Rotation2d m_lastGyroYaw = new Rotation2d();
 
   private Alert m_gyroDisconnectedAlert = new Alert("Gyro Disconnected", AlertType.kError);
@@ -52,7 +50,8 @@ public class Drive extends SubsystemBase {
   public enum DriveProfiles {
     kAutoDefault,
     kTeleopDefault,
-    kStop
+    kStop,
+    kCharacterization
   }
 
   private SubsystemProfiles<DriveProfiles> m_profiles;
@@ -115,27 +114,11 @@ public class Drive extends SubsystemBase {
     // Start threads (no-op for each if no signals have been created)
     PhoenixOdometryThread.getInstance().start();
 
-    // Configure SysId
-    m_sysId =
-        new SysIdRoutine(
-            new SysIdRoutine.Config(
-                null,
-                null,
-                null,
-                (state) -> Logger.recordOutput("Drive/SysIdState", state.toString())),
-            new SysIdRoutine.Mechanism(
-                (voltage) -> {
-                  for (int i = 0; i < 4; i++) {
-                    m_modules[i].runCharacterization(voltage.in(Volts));
-                  }
-                },
-                null,
-                this));
-
     Map<DriveProfiles, Runnable> periodicHash = new HashMap<>();
     periodicHash.put(DriveProfiles.kTeleopDefault, this::teleopDefaultPeriodic);
     periodicHash.put(DriveProfiles.kAutoDefault, this::autoDefaultPeriodic);
     periodicHash.put(DriveProfiles.kStop, this::stopPeriodic);
+    periodicHash.put(DriveProfiles.kCharacterization, this::characterizationPeriodic);
 
     m_profiles = new SubsystemProfiles<>(periodicHash, DriveProfiles.kTeleopDefault);
 
@@ -155,7 +138,7 @@ public class Drive extends SubsystemBase {
     double start = HALUtil.getFPGATime();
 
     double updateInputsStart = HALUtil.getFPGATime();
-    m_odometryLock.lock(); // Prevents odometry updates while reading data
+    m_odometryLock.lock(); 
     m_gyroIO.updateInputs(m_gyroInputs);
     for (var module : m_modules) {
       module.updateInputs();
@@ -319,13 +302,19 @@ public class Drive extends SubsystemBase {
     Logger.recordOutput("Drive/DesiredSpeeds", m_desiredChassisSpeeds);
     Logger.recordOutput("Drive/MeasuredSpeeds", getChassisSpeeds());
   }
+  
+  public void characterizationPeriodic() {
+    Logger.recordOutput("Drive/DesiredHeading", m_desiredHeading.getDegrees());
+    Logger.recordOutput("Drive/CurrentHeading", getPose().getRotation().getDegrees());
+    Logger.recordOutput("Drive/DesiredSpeeds", m_desiredChassisSpeeds);
+    Logger.recordOutput("Drive/MeasuredSpeeds", getChassisSpeeds());
+  }
 
   @SuppressWarnings("unused")
   public void runVelocity(ChassisSpeeds speeds) {
     // Calculate module setpoints
     ChassisSpeeds discreteSpeeds = ChassisSpeeds.discretize(speeds, 0.02);
 
-    // "Universal negative sign" (should not be required but i'll leave it as an option)
     if (RobotBase.isReal() && DriveConstants.kRealReversed) {
       if (DriverStation.isTeleopEnabled()) {
         discreteSpeeds.vxMetersPerSecond = -discreteSpeeds.vxMetersPerSecond;
@@ -434,7 +423,6 @@ public class Drive extends SubsystemBase {
     return getPose().getRotation();
   }
 
-  /** Resets the current odometry pose. */
   public void setPose(Pose2d pose) {
     m_poseEstimator.resetPose(pose);
   }
@@ -446,6 +434,39 @@ public class Drive extends SubsystemBase {
       states[i] = m_modules[i].getState();
     }
     return states;
+  }
+
+  
+  /** Runs the drive in a straight line with the specified drive output. */
+  public void runCharacterization(double output) {
+    if (m_profiles.getCurrentProfile() != DriveProfiles.kCharacterization) {
+      updateProfile(DriveProfiles.kCharacterization);
+    }
+    for (int i = 0; i < 4; i++) {
+      m_modules[i].runCharacterization(output);
+    }
+  }
+
+  /** Returns the average velocity of the modules in radians/sec. */
+  public double getFFCharacterizationVelocity() {
+    double output = 0.0;
+    for (int i = 0; i < 4; i++) {
+      output += m_modules[i].getDriveVelocity() / 4.0;
+    }
+    return output;
+  }
+
+  /** Returns the position of each module in radians. */
+  public double[] getWheelRadiusCharacterizationPositions() {
+    double[] values = new double[4];
+    for (int i = 0; i < 4; i++) {
+      values[i] = m_modules[i].getWheelRadiusCharacterizationPosition();
+    }
+    return values;
+  }
+
+  public Rotation2d getGyroRotation() {
+    return m_rawGyroRotation;
   }
 
   public DriveProfiles getCurrentProfile() {
